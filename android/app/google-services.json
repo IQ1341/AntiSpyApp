@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "543959947783",
+    "project_id": "antispy-5f8a4",
+    "storage_bucket": "antispy-5f8a4.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:543959947783:android:7be5fc39b1b8474732a8a2",
+        "android_client_info": {
+          "package_name": "com.example.antispy"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCBrqkGjkELRWQ8zBozTeM87jSEhGSZOYA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
