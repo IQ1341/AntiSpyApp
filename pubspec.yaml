@@ -41,6 +41,10 @@ dependencies:
   firebase_database: ^11.3.6
   intl: ^0.20.2
   cloud_firestore: ^5.6.8
+  flutter_mjpeg: ^2.0.4
+  webview_flutter: ^4.13.0
+  webview_flutter_android: ^4.7.0
+  webview_flutter_platform_interface: ^2.13.1
 
 dev_dependencies:
   flutter_test:
