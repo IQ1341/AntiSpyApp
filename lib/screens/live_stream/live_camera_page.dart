@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_mjpeg/flutter_mjpeg.dart';
 import 'package:http/http.dart' as http;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_database/firebase_database.dart';
 import '../../widgets/costum_header.dart';
 
 class LiveCameraPage extends StatefulWidget {
@@ -13,22 +14,58 @@ class LiveCameraPage extends StatefulWidget {
 }
 
 class _LiveCameraPageState extends State<LiveCameraPage> {
-  static const String streamUrl = 'http://192.168.1.17/stream';
-  static const String captureUrl = 'http://192.168.1.17/capture';
-  static const String cloudinaryUrl = 'https://api.cloudinary.com/v1_1/dd2elgipw/image/upload';
-  static const String uploadPreset = 'cam_upload';
-
+  String? _ipAddress;
   bool _isStreamLoading = true;
   bool _hasStreamError = false;
   bool _isMotionSensorActive = false;
+  bool _hasCapturedRecently = false;
 
-  final List<DetectionLog> _detectionLogs = [
-    DetectionLog(time: "10:32", type: "Gerakan Terdeteksi"),
-    DetectionLog(time: "10:30", type: "Orang Lewat"),
-    DetectionLog(time: "10:28", type: "Gerakan Terdeteksi"),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _fetchIpAddress();
+    _listenToMotionSensor(); // PIR listener
+  }
+
+  void _listenToMotionSensor() {
+    final statusRef = FirebaseDatabase.instance.ref('sensorPIR/status');
+    statusRef.onValue.listen((event) async {
+      final status = event.snapshot.value;
+      if (status == 1 || status == '1') {
+        setState(() => _isMotionSensorActive = true);
+
+        if (!_hasCapturedRecently && _ipAddress != null) {
+          _hasCapturedRecently = true;
+          await _captureAndUploadImage();
+
+          // Reset flag setelah 10 detik
+          Future.delayed(const Duration(seconds: 10), () {
+            _hasCapturedRecently = false;
+          });
+        }
+      } else {
+        setState(() => _isMotionSensorActive = false);
+      }
+    });
+  }
+
+  Future<void> _fetchIpAddress() async {
+    final ref = FirebaseDatabase.instance.ref('esp32cam/ip');
+    final snapshot = await ref.get();
+    if (snapshot.exists) {
+      setState(() {
+        _ipAddress = snapshot.value.toString();
+      });
+    } else {
+      setState(() => _ipAddress = null);
+    }
+  }
 
   Future<void> _captureAndUploadImage() async {
+    final captureUrl = 'http://$_ipAddress/capture';
+    const cloudinaryUrl = 'https://api.cloudinary.com/v1_1/dd2elgipw/image/upload';
+    const uploadPreset = 'cam_upload';
+
     try {
       final response = await http.get(Uri.parse(captureUrl));
       if (response.statusCode != 200) throw Exception('Gagal ambil gambar dari kamera');
@@ -47,11 +84,17 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
       final data = jsonDecode(result.body);
       final imageUrl = data['secure_url'];
 
+      // Simpan gambar ke Firestore
       await FirebaseFirestore.instance.collection('captures').add({
-  'imageUrl': imageUrl,
-  'timestamp': Timestamp.now(),
-});
+        'imageUrl': imageUrl,
+        'timestamp': Timestamp.now(),
+      });
 
+      // Tambahkan log deteksi ke history
+      await FirebaseFirestore.instance.collection('History').add({
+        'motion': 'Mencurigakan',
+        'timestamp': DateTime.now().toIso8601String(),
+      });
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -67,41 +110,35 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
     }
   }
 
-  void _toggleMotionSensor() {
-    setState(() {
-      _isMotionSensorActive = !_isMotionSensorActive;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     const primaryColor = Color(0xFF5F59A6);
 
     return Scaffold(
       appBar: const CustomAppBar(title: 'AntiSpy Cam'),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          _buildStreamSection(primaryColor),
-          const SizedBox(height: 20),
-          _buildMotionSensorSection(primaryColor),
-          _buildDetectionHistorySection(primaryColor),
-        ],
-      ),
+      body: _ipAddress == null
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                _buildStreamSection(primaryColor),
+                const SizedBox(height: 20),
+                _buildMotionSensorSection(primaryColor),
+                _buildDetectionHistorySection(primaryColor),
+              ],
+            ),
     );
   }
 
   Widget _buildStreamSection(Color primaryColor) {
+    final streamUrl = 'http://$_ipAddress/stream';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         const Text(
           'Live Camera Feed',
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: Colors.black87,
-          ),
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87),
         ),
         const SizedBox(height: 12),
         ClipRRect(
@@ -151,30 +188,17 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
             ),
           ),
         ),
-        const SizedBox(height: 12),
-        ElevatedButton.icon(
-          onPressed: _captureAndUploadImage,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: primaryColor,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-          icon: const Icon(Icons.camera_alt),
-          label: const Text('Tangkap Gambar & Upload'),
-        ),
       ],
     );
   }
 
   Widget _buildMotionSensorSection(Color primaryColor) {
-    return GestureDetector(
-      onTap: _toggleMotionSensor,
-      child: _SensorStatusCard(
-        icon: Icons.motion_photos_on,
-        label: 'Sensor Gerak',
-        value: _isMotionSensorActive ? "Mencurigakan" : "Aktivitas Normal",
-        active: _isMotionSensorActive,
-        primaryColor: primaryColor,
-      ),
+    return _SensorStatusCard(
+      icon: Icons.motion_photos_on,
+      label: 'Sensor Gerak',
+      value: _isMotionSensorActive ? "Mencurigakan" : "Aktivitas Normal",
+      active: _isMotionSensorActive,
+      primaryColor: primaryColor,
     );
   }
 
@@ -188,13 +212,54 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87),
         ),
         const SizedBox(height: 12),
-        if (_detectionLogs.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(8.0),
-            child: Text('Tidak ada riwayat deteksi', style: TextStyle(color: Colors.grey)),
-          )
-        else
-          ..._detectionLogs.map((log) => _buildDetectionLogItem(log, primaryColor)),
+        SizedBox(
+          height: 250,
+          child: StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('History')
+                .orderBy('timestamp', descending: true)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              if (snapshot.hasError) {
+                return const Text('Gagal memuat data riwayat.');
+              }
+
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Text('Tidak ada riwayat deteksi', style: TextStyle(color: Colors.grey)),
+                );
+              }
+
+              final logs = snapshot.data!.docs.map((doc) {
+                final data = doc.data() as Map<String, dynamic>;
+                final motionType = data['motion'] ?? 'Tidak diketahui';
+                final timestampStr = data['timestamp'] ?? '';
+                String formattedTime = 'Tidak diketahui';
+
+                try {
+                  final dt = DateTime.parse(timestampStr);
+                  formattedTime = TimeOfDay.fromDateTime(dt).format(context);
+                } catch (_) {}
+
+                return DetectionLog(
+                  time: formattedTime,
+                  type: motionType,
+                );
+              }).toList();
+
+              return ListView.builder(
+                itemCount: logs.length,
+                itemBuilder: (context, index) =>
+                    _buildDetectionLogItem(logs[index], primaryColor),
+              );
+            },
+          ),
+        ),
       ],
     );
   }
