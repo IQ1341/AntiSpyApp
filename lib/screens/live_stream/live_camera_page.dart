@@ -19,29 +19,37 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
   bool _hasStreamError = false;
   bool _isMotionSensorActive = false;
   bool _hasCapturedRecently = false;
+  bool _isCapturingManually = false;
 
   @override
   void initState() {
     super.initState();
     _fetchIpAddress();
-    _listenToMotionSensor(); // PIR listener
+    _listenToMotionSensor();
   }
 
   void _listenToMotionSensor() {
     final statusRef = FirebaseDatabase.instance.ref('sensorPIR/status');
+
     statusRef.onValue.listen((event) async {
       final status = event.snapshot.value;
-      if (status == 1 || status == '1') {
+
+      print("📥 Status PIR: $status");
+
+      if (status == 1 || status == '1' || status == true) {
         setState(() => _isMotionSensorActive = true);
 
         if (!_hasCapturedRecently && _ipAddress != null) {
+          print("📸 Mulai capture otomatis...");
           _hasCapturedRecently = true;
           await _captureAndUploadImage();
 
-          // Reset flag setelah 10 detik
           Future.delayed(const Duration(seconds: 10), () {
             _hasCapturedRecently = false;
+            print("🔁 Reset capture flag.");
           });
+        } else {
+          print("⚠️ Sudah capture, tunggu delay.");
         }
       } else {
         setState(() => _isMotionSensorActive = false);
@@ -56,26 +64,55 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
       setState(() {
         _ipAddress = snapshot.value.toString();
       });
+      print("📡 IP ESP32 ditemukan: $_ipAddress");
     } else {
       setState(() => _ipAddress = null);
+      print("❌ IP ESP32 tidak ditemukan.");
     }
   }
 
   Future<void> _captureAndUploadImage() async {
+    if (_ipAddress == null) return;
+
     final captureUrl = 'http://$_ipAddress/capture';
     const cloudinaryUrl = 'https://api.cloudinary.com/v1_1/dd2elgipw/image/upload';
     const uploadPreset = 'cam_upload';
 
     try {
-      final response = await http.get(Uri.parse(captureUrl));
-      if (response.statusCode != 200) throw Exception('Gagal ambil gambar dari kamera');
+      print("📷 Mengambil gambar dari $_ipAddress...");
 
+      // Coba capture maksimal 2 kali
+      http.Response? response;
+      for (int attempt = 1; attempt <= 2; attempt++) {
+        try {
+          response = await http
+              .get(Uri.parse(captureUrl))
+              .timeout(const Duration(seconds: 10));
+          if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+            print("✅ Capture berhasil pada attempt ke-$attempt");
+            break;
+          } else {
+            print("⚠️ Capture gagal (status: ${response.statusCode}), mencoba ulang...");
+          }
+        } catch (e) {
+          print("⚠️ Error saat capture ke-$attempt: $e");
+          if (attempt == 2) rethrow;
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
+
+      if (response == null || response.bodyBytes.isEmpty) {
+        throw Exception('Gambar kosong atau tidak valid');
+      }
+
+      // Upload ke Cloudinary
       final uploadRequest = http.MultipartRequest('POST', Uri.parse(cloudinaryUrl));
       uploadRequest.fields['upload_preset'] = uploadPreset;
       uploadRequest.files.add(
         http.MultipartFile.fromBytes('file', response.bodyBytes, filename: 'snapshot.jpg'),
       );
 
+      print("☁️ Upload ke Cloudinary...");
       final uploadResponse = await uploadRequest.send();
       final result = await http.Response.fromStream(uploadResponse);
 
@@ -84,13 +121,12 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
       final data = jsonDecode(result.body);
       final imageUrl = data['secure_url'];
 
-      // Simpan gambar ke Firestore
+      // Simpan gambar dan log ke Firestore
       await FirebaseFirestore.instance.collection('captures').add({
         'imageUrl': imageUrl,
         'timestamp': Timestamp.now(),
       });
 
-      // Tambahkan log deteksi ke history
       await FirebaseFirestore.instance.collection('History').add({
         'motion': 'Mencurigakan',
         'timestamp': DateTime.now().toIso8601String(),
@@ -98,13 +134,14 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Gambar berhasil diunggah ke Cloudinary')),
+          const SnackBar(content: Text('✅ Gambar berhasil diunggah')),
         );
       }
     } catch (e) {
+      print("❌ Error saat capture: $e");
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Terjadi kesalahan: $e')),
+          SnackBar(content: Text('❌ Terjadi kesalahan saat capture: $e')),
         );
       }
     }
@@ -175,8 +212,8 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
                         children: [
                           const Icon(Icons.error_outline, color: Colors.red, size: 48),
                           const SizedBox(height: 8),
-                          Text('Failed to load stream', style: TextStyle(color: Colors.red[300])),
-                          Text('Check camera connection', style: TextStyle(color: Colors.red[300])),
+                          Text('Gagal memuat stream', style: TextStyle(color: Colors.red[300])),
+                          Text('Periksa koneksi kamera', style: TextStyle(color: Colors.red[300])),
                         ],
                       ),
                     );
@@ -186,6 +223,25 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
                   const Center(child: CircularProgressIndicator(color: Colors.white)),
               ],
             ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        ElevatedButton.icon(
+          onPressed: _isCapturingManually
+              ? null
+              : () async {
+                  if (_ipAddress == null) return;
+                  setState(() => _isCapturingManually = true);
+                  await _captureAndUploadImage();
+                  if (mounted) setState(() => _isCapturingManually = false);
+                },
+          icon: const Icon(Icons.camera_alt),
+          label: Text(_isCapturingManually ? 'Mengambil...' : 'Ambil Gambar'),
+          style: ElevatedButton.styleFrom(
+            foregroundColor: Colors.white,
+            backgroundColor: primaryColor,
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
         ),
       ],
@@ -286,6 +342,13 @@ class _LiveCameraPageState extends State<LiveCameraPage> {
   }
 }
 
+class DetectionLog {
+  final String time;
+  final String type;
+
+  DetectionLog({required this.time, required this.type});
+}
+
 class _SensorStatusCard extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -319,35 +382,17 @@ class _SensorStatusCard extends StatelessWidget {
         children: [
           Icon(icon, size: 36, color: active ? primaryColor : primaryColor.withOpacity(0.8)),
           const SizedBox(height: 8),
-          Text(
-            label,
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 14,
-              color: active ? primaryColor : primaryColor.withOpacity(0.8),
-            ),
-          ),
+          Text(label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: active ? Colors.redAccent : primaryColor,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              value,
-              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 13,
+              color: active ? primaryColor : Colors.black54,
             ),
           ),
         ],
       ),
     );
   }
-}
-
-class DetectionLog {
-  final String time;
-  final String type;
-
-  DetectionLog({required this.time, required this.type});
 }
